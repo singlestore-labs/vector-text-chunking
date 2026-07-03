@@ -1,0 +1,18 @@
+{
+  "singlestore": {
+    "host": "your_singlestore_host_here",
+    "port": 3306,
+    "user": "admin",
+    "password": "your_password_here",
+    "database": "chunks_db"
+  },
+  "chunking": {
+    "chunks_file": "data/semantic_chunks.json",
+    "source": "pride_and_prejudice.txt",
+    "strategy": "semantic"
+  },
+  "embeddings": {
+    "dimension": 1024,
+    "batch_size": 32
+  }
+}
