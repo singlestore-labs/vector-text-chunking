@@ -5,6 +5,7 @@ import json
 import pymysql
 import sys
 import os
+import re
 from datetime import datetime
 
 # Load configuration
@@ -17,13 +18,20 @@ if not os.path.exists(config_file):
 with open(config_file) as f:
     config = json.load(f)
 
+def validate_identifier(name, identifier_type="identifier"):
+    """Validate SQL identifiers to prevent SQL injection."""
+    if not re.match(r'^[a-zA-Z0-9_]+$', name):
+        print(f"Error: Invalid {identifier_type} '{name}'. Must contain only alphanumeric characters and underscores.")
+        sys.exit(1)
+    return name
+
 # Connection details from config
 HOST = config['singlestore']['host']
 PORT = config['singlestore']['port']
 USER = config['singlestore']['user']
 PASSWORD = config['singlestore']['password']
-DATABASE = config['singlestore']['database']
-TABLE_NAME = config['singlestore'].get('table_name', 'chunks')  # Default to 'chunks' if not specified
+DATABASE = validate_identifier(config['singlestore']['database'], "database name")
+TABLE_NAME = validate_identifier(config['singlestore'].get('table_name', 'chunks'), "table name")
 test_queries = config.get('test_queries', ['Elizabeth', 'Darcy', 'marriage'])  # Test queries for search
 
 def setup_database():

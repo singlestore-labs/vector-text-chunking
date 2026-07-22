@@ -29,6 +29,7 @@ import pymysql
 import json
 import sys
 import os
+import re
 from sentence_transformers import SentenceTransformer
 
 # Load configuration
@@ -41,13 +42,20 @@ if not os.path.exists(config_file):
 with open(config_file) as f:
     config = json.load(f)
 
+def validate_identifier(name, identifier_type="identifier"):
+    """Validate SQL identifiers to prevent SQL injection."""
+    if not re.match(r'^[a-zA-Z0-9_]+$', name):
+        print(f"Error: Invalid {identifier_type} '{name}'. Must contain only alphanumeric characters and underscores.")
+        sys.exit(1)
+    return name
+
 # Connection details from config
 HOST = config['singlestore']['host']
 PORT = config['singlestore']['port']
 USER = config['singlestore']['user']
 PASSWORD = config['singlestore']['password']
-DATABASE = config['singlestore']['database']
-TABLE_NAME = config['singlestore']['table_name']  # Required from config
+DATABASE = validate_identifier(config['singlestore']['database'], "database name")
+TABLE_NAME = validate_identifier(config['singlestore'].get('table_name', 'chunks'), "table name")
 
 # Get embedding dimension from config
 DIMENSION = config.get('embeddings', {}).get('dimension', 1024)

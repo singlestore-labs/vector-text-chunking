@@ -7,6 +7,7 @@ from sentence_transformers import SentenceTransformer
 import json
 import sys
 import os
+import re
 import argparse
 from tqdm import tqdm
 import torch  # For GPU detection
@@ -23,13 +24,20 @@ if not os.path.exists(config_file):
 with open(config_file) as f:
     config = json.load(f)
 
+def validate_identifier(name, identifier_type="identifier"):
+    """Validate SQL identifiers to prevent SQL injection."""
+    if not re.match(r'^[a-zA-Z0-9_]+$', name):
+        print(f"Error: Invalid {identifier_type} '{name}'. Must contain only alphanumeric characters and underscores.")
+        sys.exit(1)
+    return name
+
 # Connection details from config
 HOST = config['singlestore']['host']
 PORT = config['singlestore']['port']
 USER = config['singlestore']['user']
 PASSWORD = config['singlestore']['password']
-DATABASE = config['singlestore']['database']
-TABLE_NAME = config['singlestore'].get('table_name', 'chunks')  # Default to 'chunks' if not specified
+DATABASE = validate_identifier(config['singlestore']['database'], "database name")
+TABLE_NAME = validate_identifier(config['singlestore'].get('table_name', 'chunks'), "table name")
 
 # Embedding model - using a good open-source model
 # MODEL_NAME = 'all-MiniLM-L6-v2'  # 384 dimensions, fast and good quality

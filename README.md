@@ -8,9 +8,9 @@ This toolkit provides:
 - **Multiple chunking strategies** for breaking large documents into manageable pieces
 - **Vector embedding generation** for semantic search capabilities (1024 and 1536-dimensional embeddings)
 - **Database integration** with SingleStore (with vectors) and OpenSearch
-- ** Configuration-driven setup: all database connections use `config.json`. 
-- ** Embedding model is automatically selected based on configured dimensions. 
-- ** Vector indexes (IVF_PQFS) are created automatically.
+- **Configuration-driven setup**: all database connections use `config.json`
+- **Embedding model** is automatically selected based on configured dimensions
+- **Vector indexes (IVF_PQFS)** are created automatically
 
 ## 📁 Project Structure
 
@@ -149,10 +149,10 @@ python singlestore/vector_search.py "specific topic or question"
 
 ## 🔐 Security
 
-- All passwords use environment variables
+- Configuration uses `config.json` (not tracked in git)
 - No credentials in code
-- `.env` file excluded from git
-- Example configuration provided
+- Example configuration provided in `config.json.example`
+- SQL identifiers (database, table names) are validated to prevent SQL injection
 
 ## 📚 Testing 
 
@@ -174,16 +174,6 @@ Configure different embedding models in `config.json`:
 Supported models:
 - **1024 dimensions**: BAAI/bge-large-en-v1.5
 - **1536 dimensions**: Alibaba-NLP/gte-large-en-v1.5
-
-### Scale Testing
-Test with progressively larger datasets:
-```bash
-# Generate large dataset
-python generate_large_dataset.py --chunks 1000000
-
-# Test performance
-python test_vector_performance.py --size 1M
-```
 
 ## 🙏 Acknowledgments
 
