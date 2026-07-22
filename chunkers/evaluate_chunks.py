@@ -16,14 +16,16 @@ class ChunkEvaluator:
         """Analyze chunk size distribution."""
         sizes = [len(chunk) for chunk in self.chunks]
 
+        mean_val = statistics.mean(sizes) if sizes else 0
         return {
             'count': len(self.chunks),
-            'mean_size': statistics.mean(sizes),
+            'mean_size': mean_val,
             'median_size': statistics.median(sizes),
             'std_dev': statistics.stdev(sizes) if len(sizes) > 1 else 0,
             'min_size': min(sizes),
             'max_size': max(sizes),
-            'size_variance_coefficient': statistics.stdev(sizes) / statistics.mean(sizes) if len(sizes) > 1 else 0
+            'size_variance_coefficient': (statistics.stdev(sizes) / mean_val
+                                         if mean_val > 0 and len(sizes) > 1 else 0)
         }
 
     def boundary_quality(self) -> Dict:

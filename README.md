@@ -44,12 +44,12 @@ chunking/
 ### 1. Clone and Setup Environment
 
 ```bash
-git clone <repository>
-cd chunking
+git clone https://github.com/singlestore-labs/vector-text-chunking
+cd vector-text-chunking
 
 # Create virtual environment
-python3 -m venv chunking-env
-source chunking-env/bin/activate
+python3 -m venv venv
+source venv/bin/activate
 ```
 
 ### 2. Install Dependencies
@@ -99,27 +99,27 @@ python chunkers/spacy_chunker.py data/pride_and_prejudice.txt --strategy semanti
 ```bash
 # No environment variables needed - uses config.json
 
-# Load chunks
-python singlestore/load_chunks_s2.py
+# Load chunks (pass the JSON file from Step 1)
+python singlestore/load_chunks_s2.py data/chunks.json
 
 # Generate embeddings (1024 or 1536-dimensional vectors based on config)
 python singlestore/create_embeddings.py
 
 # Search with vectors
-python singlestore/vector_search.py "Elizabeth's feelings about Darcy"
+python singlestore/vector_search.py --topk "Elizabeth's feelings about Darcy"
 ```
 
 ### Step 3: Vector Similarity Search
 
 ```bash
-# Interactive vector search
-python singlestore/vector_search.py --interactive
+# Top-k vector search
+python singlestore/vector_search.py --topk "your search query"
 
-# Find similar chunks
+# Find similar chunks (by chunk ID)
 python singlestore/vector_search.py --similar 100
 
-# Direct query
-python singlestore/vector_search.py "marriage and social class"
+# Verify results with text output
+python singlestore/vector_search.py --topk "marriage and social class" --verify
 ```
 
 ## 📊 Chunking Strategies
@@ -144,7 +144,7 @@ python chunkers/text_chunker.py document.txt --strategy semantic --size 1000
 python singlestore/create_embeddings.py
 
 # 3. Query with natural language
-python singlestore/vector_search.py "specific topic or question"
+python singlestore/vector_search.py --topk "specific topic or question"
 ```
 
 ## 🔐 Security

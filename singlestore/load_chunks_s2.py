@@ -15,8 +15,24 @@ if not os.path.exists(config_file):
     print("Please create a config.json file with SingleStore connection details")
     sys.exit(1)
 
-with open(config_file) as f:
-    config = json.load(f)
+try:
+    with open(config_file) as f:
+        config = json.load(f)
+except json.JSONDecodeError as e:
+    print(f"Error: Invalid JSON in {config_file}: {e}")
+    sys.exit(1)
+
+# Validate required config keys
+try:
+    _ = config['singlestore']['host']
+    _ = config['singlestore']['port']
+    _ = config['singlestore']['user']
+    _ = config['singlestore']['password']
+    _ = config['singlestore']['database']
+except KeyError as e:
+    print(f"Error: Missing required config key: {e}")
+    print("Please check your config.json has all required singlestore fields")
+    sys.exit(1)
 
 def validate_identifier(name, identifier_type="identifier"):
     """Validate SQL identifiers to prevent SQL injection."""

@@ -21,8 +21,24 @@ if not os.path.exists(config_file):
     print("Please create a config.json file with SingleStore connection details")
     sys.exit(1)
 
-with open(config_file) as f:
-    config = json.load(f)
+try:
+    with open(config_file) as f:
+        config = json.load(f)
+except json.JSONDecodeError as e:
+    print(f"Error: Invalid JSON in {config_file}: {e}")
+    sys.exit(1)
+
+# Validate required config keys
+try:
+    _ = config['singlestore']['host']
+    _ = config['singlestore']['port']
+    _ = config['singlestore']['user']
+    _ = config['singlestore']['password']
+    _ = config['singlestore']['database']
+except KeyError as e:
+    print(f"Error: Missing required config key: {e}")
+    print("Please check your config.json has all required singlestore fields")
+    sys.exit(1)
 
 def validate_identifier(name, identifier_type="identifier"):
     """Validate SQL identifiers to prevent SQL injection."""
@@ -353,6 +369,11 @@ def main():
     dimension = config.get('embeddings', {}).get('dimension', 1024)
     batch_size = config.get('embeddings', {}).get('batch_size', 128)  # Increased default from 32
 
+    # Validate dimension
+    if not isinstance(dimension, int) or dimension <= 0:
+        print(f"Error: Invalid dimension '{dimension}'. Must be a positive integer.")
+        sys.exit(1)
+
     print(f"🚀 SingleStore {dimension}-Dimensional Vector Embeddings Generator")
     print("="*60)
 
@@ -365,7 +386,10 @@ def main():
         # Generate embeddings (pass None to use optimal batch size, or specific value from config)
         generator.generate_embeddings(batch_size=batch_size if batch_size else None, resume=not args.no_resume)
 
-        # Test vector search
+        # Test vector search with example queries
+        # NOTE: These queries are for Pride & Prejudice sample data.
+        # For your own data, expect low similarity scores (<0.5) since these
+        # specific terms may not appear in your documents.
         test_queries = [
             "Elizabeth and Darcy's relationship",
             "marriage proposal",
@@ -375,6 +399,7 @@ def main():
 
         print("\n" + "="*60)
         print("📋 Testing vector search with sample queries:")
+        print("    (These are for Pride & Prejudice demo data)")
 
         for query in test_queries:
             generator.test_vector_search(query, top_k=3)

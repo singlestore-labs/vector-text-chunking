@@ -8,7 +8,7 @@
     "table_name": "chunks"
   },
   "chunking": {
-    "chunks_file": "data/semantic_chunks.json",
+    "chunks_file": "data/chunks.json",
     "source": "pride_and_prejudice.txt",
     "strategy": "semantic"
   },
