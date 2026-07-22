@@ -48,8 +48,8 @@ def setup_database():
         # Create chunks table with full-text search
         cursor.execute(f"""
             CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                chunk_id INT,
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                chunk_id BIGINT,
                 text TEXT,
                 source VARCHAR(255),
                 strategy VARCHAR(50),
