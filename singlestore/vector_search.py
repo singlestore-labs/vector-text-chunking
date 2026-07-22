@@ -282,7 +282,7 @@ class VectorSearcher:
             query_time = time.time() - start_time
             times.append(query_time)
             max_similarity = results[0][0] if results and results[0][0] is not None else 0
-            print(f"Run {run+1}: {query_time:.3f} seconds (max similarity: {max_similarity:.4f})")
+            print(f"Run {run+1}: {query_time:.3f} seconds (max similarity: {max_similarity:.3f})")
 
         return results, times
 
@@ -434,11 +434,11 @@ def main():
             if len(results[0]) == 3:  # Has text
                 for i, (cid, text, similarity) in enumerate(results, 1):
                     preview = text[:300].replace('\n', ' ').strip() if text else ""
-                    print(f"\n{i}. Chunk {cid} (similarity: {similarity:.6f})")
+                    print(f"\n{i}. Chunk {cid} (similarity: {similarity:.3f})")
                     print(f"   Text: {preview}...")
             else:  # No text (shouldn't happen in verify mode)
                 for i, (cid, similarity) in enumerate(results, 1):
-                    print(f"{i}. Chunk {cid} (similarity: {similarity:.4f})")
+                    print(f"{i}. Chunk {cid} (similarity: {similarity:.3f})")
 
     elif args[0] == '--topk' and len(args) > 1:
         # Vector topk search
@@ -458,11 +458,11 @@ def main():
             if len(results[0]) == 3:  # Has text
                 for i, (chunk_id, text, similarity) in enumerate(results, 1):
                     preview = text[:300].replace('\n', ' ').strip() if text else ""
-                    print(f"\n{i}. Chunk {chunk_id} (similarity: {similarity:.6f})")
+                    print(f"\n{i}. Chunk {chunk_id} (similarity: {similarity:.3f})")
                     print(f"   Text: {preview}...")
             else:  # No text (shouldn't happen in verify mode)
                 for i, (chunk_id, similarity) in enumerate(results, 1):
-                    print(f"{i}. Chunk {chunk_id} (similarity: {similarity:.4f})")
+                    print(f"{i}. Chunk {chunk_id} (similarity: {similarity:.3f})")
 
     elif args[0] == '--topk-noidx' and len(args) > 1:
         # Vector topk search using Euclidean distance (no index)
