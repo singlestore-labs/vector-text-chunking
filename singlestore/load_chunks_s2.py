@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Load chunks into SingleStore cloud."""
+"""Load chunks into SingleStore."""
 
 import json
 import pymysql
@@ -233,7 +233,7 @@ if __name__ == "__main__":
         if load_chunks(chunks_file):
             # Test search (optional - we use vector search instead)
             # test_search()
-            print("\n✅ All done! Your chunks are loaded in SingleStore cloud.")
+            print("\n✅ All done! Your chunks are loaded in SingleStore.")
             print(f"   Database: {DATABASE}")
             print(f"   Table: {TABLE_NAME}")
             print(f"\n💡 Next: Run create_embeddings.py to generate vector embeddings")
