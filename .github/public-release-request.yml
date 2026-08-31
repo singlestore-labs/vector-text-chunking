@@ -1,0 +1,8 @@
+business_justification: >
+  A text chunking and vector search toolkit that demonstrates SingleStore's
+  vector search capabilities with practical examples. Published as an educational
+  resource for developers learning vector search and RAG applications, to be
+  linked from the SingleStore docs. It complements existing SingleStore Labs
+  repositories and contains no proprietary SingleStore information.
+license: Apache-2.0
+primary_contact: ahilyakulkarni

@@ -1,0 +1,754 @@
+name: public-readiness
+
+# Answers one question: is this repository safe to make public?
+# Runs the security scans and the repo-hygiene checks the Security team
+# currently performs by hand, then emits a single pass/fail report.
+#
+# Drop this file into any repository. No secrets required.
+# Checks that need repository or organization admin data are skipped (not
+# failed) when the optional READINESS_TOKEN secret is not set.
+
+on:
+  # A pull request that adds or edits the publishing manifest is the signal that
+  # someone wants to make the repo public - the workflow does not run on ordinary
+  # PRs. workflow_dispatch runs unconditionally (and works with no manifest, so it
+  # can show the template). Reusable callers should add the same paths filter.
+  pull_request:
+    paths:
+      - '.github/public-release-request.yml'
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      allowed_licenses:
+        description: Accepted SPDX identifiers for the repository license
+        type: string
+        required: false
+        default: MIT,Apache-2.0
+      required_org:
+        description: Organization that public repositories must live in
+        type: string
+        required: false
+        default: singlestore-labs
+      sast_exclude_path:
+        description: Comma-separated paths excluded from SAST
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  ALLOWED_LICENSES: ${{ inputs.allowed_licenses || 'MIT,Apache-2.0' }}
+  REQUIRED_ORG: ${{ inputs.required_org || 'singlestore-labs' }}
+  SAST_EXCLUDE_PATH: ${{ inputs.sast_exclude_path || '' }}
+  DISCLAIMER_PATTERN: intended for experimental use only
+
+jobs:
+  scan:
+    name: Security scans
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare verdict helper
+        run: |
+          mkdir -p verdicts
+          cat > /tmp/verdict.sh <<'HELPER'
+          #!/usr/bin/env bash
+          # verdict <id> <title> <blocker|warning> <pass|fail|skip> <summary>
+          jq -n \
+            --arg id "$1" --arg title "$2" --arg severity "$3" \
+            --arg status "$4" --arg summary "$5" \
+            '{id:$id,title:$title,severity:$severity,status:$status,summary:$summary}' \
+            > "verdicts/$1.json"
+          HELPER
+          chmod +x /tmp/verdict.sh
+
+      # Secrets already committed and later deleted are still in history and
+      # still public the moment the repo flips. A working-tree scan misses them.
+      - name: Secrets across full git history (TruffleHog)
+        run: |
+          # No `set -e`: a bootstrap failure must still fall through to a
+          # fail-closed verdict rather than aborting the step with no result.
+          set -uo pipefail
+          mkdir -p "$HOME/.local/bin"
+          export PATH="$HOME/.local/bin:$PATH"
+          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
+            | sh -s -- -b "$HOME/.local/bin" || true
+          # Fail closed if the tool could not be installed - otherwise the step
+          # would exit clean having scanned nothing.
+          if ! command -v trufflehog >/dev/null 2>&1; then
+            /tmp/verdict.sh secrets_history "Secrets in git history" blocker fail \
+              "TruffleHog could not be installed - secrets were not scanned"
+            exit 0
+          fi
+          TRUFFLE_EXIT=0
+          trufflehog git "file://$PWD" --json --no-update > trufflehog.json 2> trufflehog.log || TRUFFLE_EXIT=$?
+          # Fail closed: a scan that could not run must not be reported as clean.
+          if [ "$TRUFFLE_EXIT" -ne 0 ] && ! jq -e . trufflehog.json >/dev/null 2>&1; then
+            echo "::group::trufflehog.log"; cat trufflehog.log 2>/dev/null || true; echo "::endgroup::"
+            /tmp/verdict.sh secrets_history "Secrets in git history" blocker fail \
+              "TruffleHog scan failed - see the run log (trufflehog.log is also attached as an artifact)"
+            exit 0
+          fi
+          VERIFIED=$(jq -rs '[.[] | select(.Verified == true)] | length' trufflehog.json)
+          UNVERIFIED=$(jq -rs '[.[] | select(.Verified != true)] | length' trufflehog.json)
+          if [ "$VERIFIED" -gt 0 ]; then
+            /tmp/verdict.sh secrets_history "Secrets in git history" blocker fail \
+              "$VERIFIED verified secret(s) found in commit history"
+          else
+            /tmp/verdict.sh secrets_history "Secrets in git history" blocker pass \
+              "No verified secrets in history ($UNVERIFIED unverified candidate(s))"
+          fi
+
+      - name: Secrets second opinion (Gitleaks)
+        run: |
+          # No `set -e`: a bootstrap failure must still fall through to a
+          # fail-closed verdict rather than aborting the step with no result.
+          set -uo pipefail
+          mkdir -p "$HOME/.local/bin"
+          export PATH="$HOME/.local/bin:$PATH"
+          TAG=$(curl -sSfL https://api.github.com/repos/gitleaks/gitleaks/releases/latest | jq -r '.tag_name // empty')
+          VER=${TAG#v}
+          if [ -n "$TAG" ]; then
+            curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/${TAG}/gitleaks_${VER}_linux_x64.tar.gz" -o gitleaks.tgz || true
+            tar -xzf gitleaks.tgz gitleaks 2>/dev/null || true
+            mv gitleaks "$HOME/.local/bin/" 2>/dev/null || true
+          fi
+          # Fail closed if the tool could not be installed.
+          if ! command -v gitleaks >/dev/null 2>&1; then
+            /tmp/verdict.sh secrets_gitleaks "Secrets in history (Gitleaks)" blocker fail \
+              "Gitleaks could not be installed - secrets were not scanned"
+            exit 0
+          fi
+          # Scans full history by default. Findings block publication because a
+          # secret in history is exposed the moment the repo goes public.
+          # Known-safe matches (test fixtures, sample keys) can be allowlisted
+          # by committing their fingerprints to a .gitleaksignore file, which
+          # gitleaks reads automatically.
+          GITLEAKS_EXIT=0
+          gitleaks detect --source . --report-format json --report-path gitleaks.json --redact || GITLEAKS_EXIT=$?
+          # Fail closed: no valid report array means the scan did not complete.
+          if [ ! -f gitleaks.json ] || ! jq -e 'type == "array"' gitleaks.json >/dev/null 2>&1; then
+            /tmp/verdict.sh secrets_gitleaks "Secrets in history (Gitleaks)" blocker fail \
+              "Gitleaks scan failed (exit $GITLEAKS_EXIT) - see the run logs"
+            exit 0
+          fi
+          COUNT=$(jq 'length' gitleaks.json)
+          if [ "$COUNT" -gt 0 ]; then
+            /tmp/verdict.sh secrets_gitleaks "Secrets in history (Gitleaks)" blocker fail \
+              "$COUNT secret(s) found in history - remove them and rotate, or allowlist known-safe matches in .gitleaksignore"
+          else
+            /tmp/verdict.sh secrets_gitleaks "Secrets in history (Gitleaks)" blocker pass "No findings"
+          fi
+
+      - name: SAST (Semgrep)
+        run: |
+          pipx install semgrep || pip install --quiet --break-system-packages semgrep
+          EXCLUDES=""
+          IFS=',' read -ra PATHS <<< "$SAST_EXCLUDE_PATH"
+          for p in "${PATHS[@]}"; do
+            p=$(echo "$p" | xargs)
+            [ -n "$p" ] && EXCLUDES+=" --exclude $p"
+          done
+          semgrep scan --config=auto --json --output semgrep.json --quiet $EXCLUDES || true
+          COUNT=$(jq '.results | length' semgrep.json 2>/dev/null || echo 0)
+          if [ "$COUNT" -gt 0 ]; then
+            /tmp/verdict.sh sast "SAST (Semgrep)" warning fail "$COUNT finding(s)"
+          else
+            /tmp/verdict.sh sast "SAST (Semgrep)" warning pass "No findings"
+          fi
+
+      # No Prisma API key: Checkov runs in local open-source mode. Fork pull
+      # requests never receive secrets, so a key-dependent scan would fail on
+      # exactly the outside contributions a public repo exists to receive.
+      - name: IaC (Checkov)
+        run: |
+          pipx install checkov || pip install --quiet --break-system-packages checkov
+          checkov -d . --quiet --compact -o json --output-file-path . > /dev/null 2>&1 || true
+          COUNT=$(jq '[ (if type=="array" then .[] else . end) | .results.failed_checks[]? ] | length' \
+            results_json.json 2>/dev/null || echo 0)
+          if [ "$COUNT" -gt 0 ]; then
+            /tmp/verdict.sh iac "IaC (Checkov)" warning fail "$COUNT failed check(s)"
+          else
+            /tmp/verdict.sh iac "IaC (Checkov)" warning pass "No failed checks"
+          fi
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Dependency licenses (OSV-Scanner)
+        run: |
+          go install github.com/google/osv-scanner/v2/cmd/osv-scanner@latest
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          osv-scanner --no-ignore=true --format json --licenses="$ALLOWED_LICENSES" \
+            --no-call-analysis=go -r ./ > osv.json 2> osv.log || true
+          COUNT=$(jq '[ .results[]? | select(.packages != null) | .packages[]
+            | select(.license_violations != null and .license_violations != []) ] | length' \
+            osv.json 2>/dev/null || echo 0)
+          if [ "$COUNT" -gt 0 ]; then
+            /tmp/verdict.sh dep_licenses "Dependency licenses" warning fail \
+              "$COUNT dependency license violation(s)"
+          else
+            /tmp/verdict.sh dep_licenses "Dependency licenses" warning pass "No violations"
+          fi
+
+      - name: Workflow lint (Zizmor)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pipx install zizmor || pip install --quiet --break-system-packages zizmor
+          if [ -d .github/workflows ]; then
+            zizmor .github/workflows --format json > zizmor.json 2> zizmor.log || true
+            COUNT=$(jq 'if type=="array" then length else ((.findings? // []) | length) end' \
+              zizmor.json 2>/dev/null || echo 0)
+            if [ "$COUNT" -gt 0 ]; then
+              /tmp/verdict.sh actions_lint "GitHub Actions lint" warning fail "$COUNT finding(s)"
+            else
+              /tmp/verdict.sh actions_lint "GitHub Actions lint" warning pass "No findings"
+            fi
+          else
+            /tmp/verdict.sh actions_lint "GitHub Actions lint" warning skip "No workflows directory"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verdicts-scan
+          path: verdicts/
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scan-reports
+          path: |
+            trufflehog.json
+            trufflehog.log
+            gitleaks.json
+            semgrep.json
+            results_json.json
+            osv.json
+            zizmor.json
+          if-no-files-found: ignore
+
+  hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Prepare verdict helper
+        run: |
+          mkdir -p verdicts
+          cat > /tmp/verdict.sh <<'HELPER'
+          #!/usr/bin/env bash
+          jq -n \
+            --arg id "$1" --arg title "$2" --arg severity "$3" \
+            --arg status "$4" --arg summary "$5" \
+            '{id:$id,title:$title,severity:$severity,status:$status,summary:$summary}' \
+            > "verdicts/$1.json"
+          HELPER
+          chmod +x /tmp/verdict.sh
+
+      # Parses the publishing manifest and validates the fields are actually
+      # filled in (not the template placeholders). The assembled request is
+      # written to verdicts/request.md so the report can show it, and to
+      # verdicts/request.env for the ticketing step that comes later.
+      - name: Publishing request manifest
+        run: |
+          MANIFEST=.github/public-release-request.yml
+          if [ ! -f "$MANIFEST" ]; then
+            /tmp/verdict.sh manifest "Publishing request" blocker skip \
+              "No $MANIFEST - add one to request publication"
+            # Leave the template so the report can show what to add.
+            cat > verdicts/request_template.md <<'TEMPLATE'
+          business_justification: >
+            Explain why this belongs in the open and confirm it contains no
+            proprietary SingleStore information.
+
+          license: Apache-2.0
+
+          # GitHub handle of the person accountable for the repo after it is public.
+          primary_contact: your-github-username
+          TEMPLATE
+            exit 0
+          fi
+
+          python3 - "$MANIFEST" <<'PY'
+          import sys, json
+          path = sys.argv[1]
+          try:
+              import yaml
+          except ImportError:
+              import subprocess
+              subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
+                              "--break-system-packages", "pyyaml"], check=False)
+              subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
+                              "pyyaml"], check=False)
+              import yaml
+
+          with open(path) as fh:
+              data = yaml.safe_load(fh) or {}
+
+          def field(name):
+              return str(data.get(name) or "").strip()
+
+          justification = " ".join(field("business_justification").split())
+          license_id = field("license")
+          contact = field("primary_contact").lstrip("@")
+
+          PLACEHOLDERS = ("your-github-username", "explain why this belongs in the open")
+          problems = []
+          if not justification or any(p in justification.lower() for p in PLACEHOLDERS) \
+             or justification.lower().startswith("example:"):
+              problems.append("business_justification")
+          if not license_id:
+              problems.append("license")
+          if not contact or contact.lower() in PLACEHOLDERS or " " in contact:
+              problems.append("primary_contact")
+
+          with open("verdicts/request.env", "w") as fh:
+              fh.write(f"REQUEST_JUSTIFICATION={json.dumps(justification)}\n")
+              fh.write(f"REQUEST_LICENSE={json.dumps(license_id)}\n")
+              fh.write(f"REQUEST_CONTACT={json.dumps(contact)}\n")
+
+          if problems:
+              with open("/tmp/manifest_status", "w") as fh:
+                  fh.write("fail " + ",".join(problems) + "\n")
+              sys.exit(0)
+
+          with open("verdicts/request.md", "w") as fh:
+              fh.write(f"- **Primary contact:** @{contact}\n")
+              fh.write(f"- **Requested license:** {license_id}\n")
+              fh.write(f"- **Business justification:** {justification}\n")
+          with open("/tmp/manifest_status", "w") as fh:
+              fh.write(f"pass {contact}|{license_id}\n")
+          PY
+
+          # '|| true' so a missing trailing newline can never fail the step under -e.
+          read -r STATUS REST < /tmp/manifest_status || true
+          if [ "$STATUS" = "pass" ]; then
+            CONTACT="${REST%%|*}"; LICENSE="${REST##*|}"
+            /tmp/verdict.sh manifest "Publishing request" blocker pass \
+              "Requested by @$CONTACT, license $LICENSE"
+          else
+            /tmp/verdict.sh manifest "Publishing request" blocker fail \
+              "Fill in the placeholder field(s): $REST"
+          fi
+
+      - name: CODEOWNERS present
+        run: |
+          FOUND=""
+          for p in .github/CODEOWNERS CODEOWNERS docs/CODEOWNERS; do
+            if [ -s "$p" ]; then FOUND="$p"; break; fi
+          done
+          if [ -n "$FOUND" ]; then
+            grep -oE '@[A-Za-z0-9._/-]+' "$FOUND" | sort -u > /tmp/owners.txt || true
+            OWNER_COUNT=$(wc -l < /tmp/owners.txt | tr -d ' ')
+            if [ "$OWNER_COUNT" -eq 0 ]; then
+              /tmp/verdict.sh codeowners "CODEOWNERS" blocker fail \
+                "$FOUND exists but defines no owners (need at least one @handle)"
+            else
+              /tmp/verdict.sh codeowners "CODEOWNERS" blocker pass \
+                "$FOUND with $OWNER_COUNT owner entr(ies)"
+            fi
+          else
+            : > /tmp/owners.txt
+            /tmp/verdict.sh codeowners "CODEOWNERS" blocker fail "No CODEOWNERS file found"
+          fi
+
+      # A repo must not be left without a live owner when someone leaves, so
+      # each individual owner is checked for current org membership.
+      - name: CODEOWNERS still active
+        env:
+          GH_TOKEN: ${{ secrets.READINESS_TOKEN || github.token }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          if [ ! -s /tmp/owners.txt ]; then
+            /tmp/verdict.sh codeowners_active "CODEOWNERS are active" blocker fail \
+              "No owners to check - CODEOWNERS must define at least one @handle"
+            exit 0
+          fi
+          ACTIVE=0; INACTIVE=""; UNKNOWN=0
+          while read -r entry; do
+            handle="${entry#@}"
+            case "$handle" in
+              */*) ACTIVE=$((ACTIVE+1)); continue ;;   # team handle, membership implied
+            esac
+            if gh api "orgs/$OWNER/members/$handle" --silent 2>/dev/null; then
+              ACTIVE=$((ACTIVE+1))
+            else
+              # 404 = not a member (inactive); anything else (403/no token) is unknown.
+              CODE=$(gh api "orgs/$OWNER/members/$handle" -i 2>/dev/null \
+                | sed -n '1s/.* \([0-9]\{3\}\).*/\1/p' || true)
+              if [ "$CODE" = "404" ]; then
+                INACTIVE="$INACTIVE $handle"
+              else
+                UNKNOWN=$((UNKNOWN+1))
+              fi
+            fi
+          done < /tmp/owners.txt
+          if [ "$UNKNOWN" -gt 0 ]; then
+            /tmp/verdict.sh codeowners_active "CODEOWNERS are active" blocker skip \
+              "Cannot verify membership - set READINESS_TOKEN with read:org"
+          elif [ -n "$INACTIVE" ]; then
+            /tmp/verdict.sh codeowners_active "CODEOWNERS are active" blocker fail \
+              "No longer in the organization:$INACTIVE"
+          elif [ "$ACTIVE" -lt 2 ]; then
+            /tmp/verdict.sh codeowners_active "CODEOWNERS are active" warning fail \
+              "Only one active owner - add a second so the repo is not orphaned"
+          else
+            /tmp/verdict.sh codeowners_active "CODEOWNERS are active" blocker pass \
+              "$ACTIVE active owner(s)"
+          fi
+
+      # Detected from the checked-out tree, not the repos API: the API reflects
+      # the default branch, so a LICENSE added in this very PR would be missed.
+      - name: Approved license
+        run: |
+          FILE=""
+          for f in LICENSE LICENSE.md LICENSE.txt COPYING; do
+            if [ -f "$f" ]; then FILE="$f"; break; fi
+          done
+          SPDX=""
+          if [ -n "$FILE" ]; then
+            # Honour an explicit SPDX tag if present, else identify the two
+            # approved licenses by their canonical text.
+            SPDX=$(grep -ioE 'SPDX-License-Identifier:[[:space:]]*[A-Za-z0-9.+-]+' "$FILE" \
+              | head -1 | sed -E 's/.*:[[:space:]]*//' || true)
+            if [ -z "$SPDX" ]; then
+              if grep -qi "Apache License" "$FILE" && grep -qi "Version 2.0" "$FILE"; then
+                SPDX="Apache-2.0"
+              elif grep -qi "Permission is hereby granted, free of charge" "$FILE"; then
+                SPDX="MIT"
+              fi
+            fi
+          fi
+          if [ -z "$FILE" ]; then
+            /tmp/verdict.sh license "Approved license" blocker fail \
+              "No LICENSE file found (need one of $ALLOWED_LICENSES)"
+          elif [ -z "$SPDX" ]; then
+            /tmp/verdict.sh license "Approved license" blocker fail \
+              "$FILE present but license not recognized (need one of $ALLOWED_LICENSES)"
+          elif echo ",$ALLOWED_LICENSES," | grep -q ",$SPDX,"; then
+            /tmp/verdict.sh license "Approved license" blocker pass "$SPDX ($FILE)"
+          else
+            /tmp/verdict.sh license "Approved license" blocker fail \
+              "$SPDX is not in the approved list ($ALLOWED_LICENSES)"
+          fi
+
+      - name: As-is disclaimer in README
+        run: |
+          README=$(ls README.md README.rst README 2>/dev/null | head -n1 || true)
+          if [ -z "$README" ]; then
+            /tmp/verdict.sh disclaimer "As-is disclaimer" blocker fail "No README found"
+          elif grep -qi "$DISCLAIMER_PATTERN" "$README"; then
+            /tmp/verdict.sh disclaimer "As-is disclaimer" blocker pass "Present in $README"
+          else
+            /tmp/verdict.sh disclaimer "As-is disclaimer" blocker fail \
+              "Missing from $README - see the report for the text to add"
+          fi
+
+      - name: Repository is in the correct organization
+        run: |
+          if [ "${{ github.repository_owner }}" = "$REQUIRED_ORG" ]; then
+            /tmp/verdict.sh org "Correct organization" blocker pass "$REQUIRED_ORG"
+          else
+            /tmp/verdict.sh org "Correct organization" blocker fail \
+              "In ${{ github.repository_owner }} - public repos must live in $REQUIRED_ORG"
+          fi
+
+      # This repo uses rulesets rather than legacy branch protection, and so do
+      # the labs repos, so /rulesets is the endpoint that reflects reality.
+      - name: Default branch is protected
+        env:
+          GH_TOKEN: ${{ secrets.READINESS_TOKEN || github.token }}
+        run: |
+          if ! RULESETS=$(gh api "repos/${{ github.repository }}/rulesets" 2>/dev/null); then
+            /tmp/verdict.sh branch_rules "Default branch protection" blocker skip \
+              "Cannot read rulesets - set READINESS_TOKEN with repo admin access"
+            exit 0
+          fi
+          DEFAULT_BRANCH=$(gh api "repos/${{ github.repository }}" --jq '.default_branch')
+          # A ruleset only protects the default branch if its conditions target
+          # that branch. GitHub expresses this as ~DEFAULT_BRANCH, ~ALL, or a
+          # ref pattern like refs/heads/main.
+          ref_matches() {
+            local ref="$1" pattern="$2"
+            case "$pattern" in
+              '~DEFAULT_BRANCH') [ "$ref" = "$DEFAULT_BRANCH" ] ;;
+              '~ALL') return 0 ;;
+              refs/heads/*) [[ "refs/heads/$ref" == $pattern ]] ;;
+              *) [[ "$ref" == $pattern ]] ;;
+            esac
+          }
+          ruleset_targets_default() {
+            local detail="$1" applies=false pat
+            [ "$(echo "$detail" | jq -r '.target // ""')" = "branch" ] || return 1
+            while IFS= read -r pat; do
+              [ -z "$pat" ] && continue
+              if ref_matches "$DEFAULT_BRANCH" "$pat"; then applies=true; break; fi
+            done < <(echo "$detail" | jq -r '.conditions.ref_name.include[]? // empty')
+            [ "$applies" = true ] || return 1
+            while IFS= read -r pat; do
+              [ -z "$pat" ] && continue
+              if ref_matches "$DEFAULT_BRANCH" "$pat"; then return 1; fi
+            done < <(echo "$detail" | jq -r '.conditions.ref_name.exclude[]? // empty')
+            return 0
+          }
+          DEFAULT_PROTECTED=false
+          NEEDS_PR=false; NEEDS_OWNER=false; NEEDS_THREADS=false
+          for ID in $(echo "$RULESETS" | jq -r '.[] | select(.enforcement == "active") | .id'); do
+            DETAIL=$(gh api "repos/${{ github.repository }}/rulesets/$ID" 2>/dev/null || echo '{}')
+            ruleset_targets_default "$DETAIL" || continue
+            DEFAULT_PROTECTED=true
+            PR=$(echo "$DETAIL" | jq '.rules[]? | select(.type == "pull_request")')
+            [ -n "$PR" ] || continue
+            [ "$(echo "$PR" | jq '.parameters.required_approving_review_count // 0')" -ge 1 ] && NEEDS_PR=true
+            [ "$(echo "$PR" | jq '.parameters.require_code_owner_review // false')" = "true" ] && NEEDS_OWNER=true
+            [ "$(echo "$PR" | jq '.parameters.required_review_thread_resolution // false')" = "true" ] && NEEDS_THREADS=true
+          done
+          if [ "$DEFAULT_PROTECTED" = false ]; then
+            /tmp/verdict.sh branch_rules "Default branch protection" blocker fail \
+              "No active ruleset protects the default branch ($DEFAULT_BRANCH)"
+            exit 0
+          fi
+          MISSING=""
+          [ "$NEEDS_PR" = true ]      || MISSING="$MISSING required-review;"
+          [ "$NEEDS_OWNER" = true ]   || MISSING="$MISSING code-owner-review;"
+          [ "$NEEDS_THREADS" = true ] || MISSING="$MISSING conversation-resolution;"
+          if [ -n "$MISSING" ]; then
+            /tmp/verdict.sh branch_rules "Default branch protection" blocker fail "Missing:$MISSING"
+          else
+            /tmp/verdict.sh branch_rules "Default branch protection" blocker pass \
+              "Ruleset requires review, code owner approval and thread resolution"
+          fi
+
+      - name: Outside collaborators cannot push
+        env:
+          GH_TOKEN: ${{ secrets.READINESS_TOKEN || github.token }}
+        run: |
+          if ! OUTSIDE=$(gh api "repos/${{ github.repository }}/collaborators?affiliation=outside" 2>/dev/null); then
+            /tmp/verdict.sh outside_collab "Fork-only for outsiders" warning skip \
+              "Cannot read collaborators - set READINESS_TOKEN with repo admin access"
+            exit 0
+          fi
+          PUSHERS=$(echo "$OUTSIDE" | jq -r '[.[] | select(.permissions.push == true) | .login] | join(", ")')
+          if [ -n "$PUSHERS" ]; then
+            /tmp/verdict.sh outside_collab "Fork-only for outsiders" warning fail \
+              "Outside collaborators with push: $PUSHERS"
+          else
+            /tmp/verdict.sh outside_collab "Fork-only for outsiders" warning pass \
+              "No outside collaborators with push access"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verdicts-hygiene
+          path: verdicts/
+
+  report:
+    name: Readiness report
+    runs-on: ubuntu-latest
+    needs: [scan, hygiene]
+    if: always()
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: verdicts-*
+          merge-multiple: true
+          path: verdicts
+
+      - name: Build report
+        id: build
+        run: |
+          # A job can die before writing verdicts; report that rather than crashing.
+          if ! compgen -G "verdicts/*.json" > /dev/null; then
+            mkdir -p verdicts
+            jq -n '{id:"infrastructure",title:"Readiness checks",severity:"blocker",
+                    status:"fail",summary:"Scan or hygiene job failed before producing results"}' \
+              > verdicts/infrastructure.json
+          fi
+
+          # Defense in depth: every expected blocker check must have produced a
+          # verdict. A missing one means its step or job died before recording a
+          # result, so fail closed instead of silently dropping it from the tally.
+          for id in secrets_history secrets_gitleaks license disclaimer org \
+                    codeowners codeowners_active branch_rules manifest; do
+            if [ ! -f "verdicts/$id.json" ]; then
+              jq -n --arg id "$id" \
+                '{id:$id,title:$id,severity:"blocker",status:"fail",
+                  summary:"Check did not run - its job failed before producing a result"}' \
+                > "verdicts/$id.json"
+            fi
+          done
+
+          BLOCKERS=$(jq -s '[.[] | select(.severity == "blocker" and .status == "fail")] | length' verdicts/*.json)
+          WARNINGS=$(jq -s '[.[] | select(.severity == "warning" and .status == "fail")] | length' verdicts/*.json)
+          # Only count skips that happened because the READINESS_TOKEN was absent,
+          # so the token hint is not shown for unrelated skips (e.g. no manifest).
+          TOKEN_SKIPS=$(jq -s '[.[] | select(.status == "skip" and (.summary | test("READINESS_TOKEN")))] | length' verdicts/*.json)
+
+          # Emoji render in color in the GitHub UI: green check, red X, warning, skip.
+          # Blocker fail -> red X (FAIL); warning fail -> yellow (REVIEW).
+          ROW_FILTER='
+            def icon:
+              if .status == "pass" then "✅ Pass"
+              elif .status == "skip" then "⏭️ Skipped"
+              elif .severity == "blocker" then "❌ Fail"
+              else "⚠️ Review" end;
+            def rank:
+              if .status == "fail" then 0 elif .status == "skip" then 1 else 2 end;
+            [.[] | select(.severity == $sev)] | sort_by(rank) | .[]
+            | "| " + icon + " | **" + .title + "** | " + (.summary | gsub("\n"; " ")) + " |"'
+
+          {
+            if [ "$BLOCKERS" -gt 0 ]; then
+              echo "> [!CAUTION]"
+              echo "> **Not ready to publish — $BLOCKERS blocker(s) must be resolved.**"
+              echo "> Fix the items marked ❌ below, then re-run."
+            else
+              echo "> [!TIP]"
+              echo "> **Ready for security review — no blockers found.**"
+              echo "> Attach this report to the INFOSEC request."
+            fi
+            echo ""
+
+            echo "### Blockers"
+            echo ""
+            echo "| Status | Check | Detail |"
+            echo "| --- | --- | --- |"
+            jq -rs --arg sev blocker "$ROW_FILTER" verdicts/*.json
+            echo ""
+
+            echo "### Advisory"
+            echo ""
+            echo "| Status | Check | Detail |"
+            echo "| --- | --- | --- |"
+            jq -rs --arg sev warning "$ROW_FILTER" verdicts/*.json
+            echo ""
+
+            if [ "$TOKEN_SKIPS" -gt 0 ]; then
+              echo "> [!NOTE]"
+              echo "> Some settings checks were skipped. Add a \`READINESS_TOKEN\` secret"
+              echo "> (repo admin + \`read:org\`) to enable them."
+              echo ""
+            fi
+            if [ -s verdicts/request.md ]; then
+              echo "### Publishing request"
+              echo ""
+              cat verdicts/request.md
+              echo ""
+              echo "_These fields will populate the INFOSEC ticket once the report passes._"
+              echo ""
+            elif [ -s verdicts/request_template.md ]; then
+              echo "<details><summary>Add a publishing request to start</summary>"
+              echo ""
+              echo "Commit \`.github/public-release-request.yml\` with your details:"
+              echo ""
+              echo '```yaml'
+              cat verdicts/request_template.md
+              echo '```'
+              echo ""
+              echo "</details>"
+              echo ""
+            fi
+            if jq -s -e '.[] | select(.id == "disclaimer" and .status == "fail")' verdicts/*.json > /dev/null; then
+              echo "<details><summary>Disclaimer text to add to the README</summary>"
+              echo ""
+              echo "> Attention: The code in this repository is intended for experimental use only"
+              echo "> and is not fully tested, documented, or supported by SingleStore. Visit the"
+              echo "> SingleStore Forums to ask questions about this repository."
+              echo ""
+              echo "</details>"
+              echo ""
+            fi
+            echo "_Full scanner output is attached to this run as artifacts._"
+          } > report.md
+
+          echo "blockers=$BLOCKERS" >> "$GITHUB_OUTPUT"
+          echo "warnings=$WARNINGS" >> "$GITHUB_OUTPUT"
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: public-readiness-report
+          path: report.md
+
+      # Fork pull requests get a read-only token and cannot comment.
+      - name: Comment on the pull request
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # The report job does not check out the repo, so gh cannot infer it
+          # from a local git remote - it is passed explicitly with -R.
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr comment "$PR" -R "$REPO" --body-file report.md --edit-last --create-if-none \
+            || gh pr comment "$PR" -R "$REPO" --body-file report.md
+
+      # Notifies the security team when a publishing PR is fully green. No-ops
+      # when the SLACK_WEBHOOK_URL secret is not configured.
+      - name: Notify Slack
+        if: github.event_name == 'pull_request' && steps.build.outputs.blockers == '0'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          REPO: ${{ github.repository }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          WARNINGS: ${{ steps.build.outputs.warnings }}
+        run: |
+          if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+            echo "No SLACK_WEBHOOK_URL secret; skipping Slack notification."
+            exit 0
+          fi
+          LICENSE=$(sed -n 's/^REQUEST_LICENSE=//p' verdicts/request.env 2>/dev/null | jq -r . 2>/dev/null || echo "")
+          JUSTIFICATION=$(sed -n 's/^REQUEST_JUSTIFICATION=//p' verdicts/request.env 2>/dev/null | jq -r . 2>/dev/null || echo "")
+          CHECKS="All blockers passed"
+          if [ "${WARNINGS:-0}" != "0" ]; then CHECKS="$CHECKS · ${WARNINGS} advisory item(s)"; fi
+          PAYLOAD=$(jq -n \
+            --arg repo "$REPO" --arg repo_url "$REPO_URL" --arg pr "$PR_URL" \
+            --arg run "$RUN_URL" --arg author "$PR_AUTHOR" \
+            --arg lic "$LICENSE" --arg just "$JUSTIFICATION" --arg checks "$CHECKS" '
+            { text: ("Ready for security review: " + $repo),
+              blocks: [
+                { type:"header", text:{ type:"plain_text", text:"✅ Ready for security review", emoji:true } },
+                { type:"section", fields:[
+                  { type:"mrkdwn", text:("*Repository:*\n<" + $repo_url + "|" + $repo + ">") },
+                  { type:"mrkdwn", text:("*Requested by:*\n@" + $author) },
+                  { type:"mrkdwn", text:("*License:*\n" + (if $lic == "" then "-" else $lic end)) },
+                  { type:"mrkdwn", text:("*Checks:*\n" + $checks) }
+                ] },
+                { type:"section", text:{ type:"mrkdwn", text:("*Justification:*\n" + (if $just == "" then "-" else $just end)) } },
+                { type:"actions", elements:[
+                  { type:"button", text:{ type:"plain_text", text:"Review the PR" }, style:"primary", url:$pr },
+                  { type:"button", text:{ type:"plain_text", text:"View full report" }, url:$run }
+                ] }
+              ] }')
+          # Best effort: the readiness verdict is already reflected in the PR
+          # comment and check status. A webhook outage must not turn a green
+          # result red, so a failed post is a warning, not a job failure.
+          if ! printf '%s' "$PAYLOAD" \
+              | curl -sSf --max-time 30 -X POST -H 'Content-type: application/json' \
+                     --data @- "$SLACK_WEBHOOK_URL"; then
+            echo "::warning::Slack notification failed to send; the readiness result is unaffected."
+          fi
+
+      - name: Fail when blockers remain
+        if: steps.build.outputs.blockers != '0'
+        run: |
+          echo "::error::${{ steps.build.outputs.blockers }} blocker(s) prevent publication. See the readiness report."
+          exit 1
