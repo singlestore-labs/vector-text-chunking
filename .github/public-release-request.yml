@@ -1,0 +1,5 @@
+business_justification: >
+  Educational toolkit demonstrating text chunking strategies and vector search with SingleStore.
+  Contains no proprietary SingleStore information.
+license: Apache-2.0
+primary_contact: ahilyakulkarni
