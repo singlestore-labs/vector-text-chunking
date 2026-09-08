@@ -4,7 +4,7 @@
 
 A comprehensive framework for text chunking, vector embeddings, and semantic search using SingleStore. Python scripts to chunk data using multiple chunking strategies and loading data into SingleStore are provided.
 
-## 🚀 Overview
+## Overview
 
 This toolkit provides:
 - **Multiple chunking strategies** for breaking large documents into manageable pieces
@@ -14,7 +14,7 @@ This toolkit provides:
 - **Embedding model** is automatically selected based on configured dimensions
 - **Vector indexes (IVF_PQFS)** are created automatically
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 chunking/
@@ -33,15 +33,12 @@ chunking/
 │   ├── index_chunks.py      # Index documents
 │   ├── search_chunks.py     # Search interface
 │   └── docker-compose.yml   # Docker setup
-├── data/               # Sample data
-│   ├── chunks.json          # Generated chunks
-│   └── pride_and_prejudice.txt
-└── plans/              # Documentation & planning
-    ├── vector_testing_plan.md
-    └── script_structure.md
+└── data/               # Sample data
+    ├── chunks.json          # Generated chunks
+    └── pride_and_prejudice.txt
 ```
 
-## 🔧 Installation
+## Installation
 
 ### 1. Clone and Setup Environment
 
@@ -82,7 +79,7 @@ cp config.json.example config.json
 # - Chunking configuration
 ```
 
-## 🎯 Quick Start
+## Quick Start
 
 ### Step 1: Generate Text Chunks
 
@@ -124,7 +121,7 @@ python singlestore/vector_search.py --similar 100
 python singlestore/vector_search.py --topk "marriage and social class" --verify
 ```
 
-## 📊 Chunking Strategies
+## Chunking Strategies
 
 | Strategy | Implementation | Best For | Key Features |
 |----------|---------------|----------|--------------|
@@ -149,18 +146,14 @@ python singlestore/create_embeddings.py
 python singlestore/vector_search.py --topk "specific topic or question"
 ```
 
-## 🔐 Security
+## Security
 
 - Configuration uses `config.json` (not tracked in git)
 - No credentials in code
 - Example configuration provided in `config.json.example`
 - SQL identifiers (database, table names) are validated to prevent SQL injection
 
-## 📚 Testing 
-
-- `plans/vector_testing_plan.md` - Plan for testing framework
-
-## 🛠️ Advanced Features
+## Advanced Features
 
 ### Custom Embeddings
 Configure different embedding models in `config.json`:
@@ -177,9 +170,9 @@ Supported models:
 - **1024 dimensions**: BAAI/bge-large-en-v1.5
 - **1536 dimensions**: Alibaba-NLP/gte-large-en-v1.5
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - **Sample Text**: Project Gutenberg (Pride and Prejudice)
 - **Libraries**: sentence-transformers, NLTK, spaCy, LangChain
 - **Databases**: SingleStore, OpenSearch
-- **Embedding Model**: all-MiniLM-L6-v2
+- **Embedding Models**: BAAI/bge-large-en-v1.5, Alibaba-NLP/gte-large-en-v1.5
